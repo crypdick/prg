@@ -10,14 +10,14 @@ import warnings
 import numpy as np
 import matplotlib.pyplot as plt
 
+epsilon = 1e-7
+
 def precision(tp, fn, fp, tn):
-    with np.errstate(divide='ignore', invalid='ignore'):
-        return tp/(tp + fp)
+  return tp/(tp + fp + epsilon)
 
 
 def recall(tp, fn, fp, tn):
-    with np.errstate(divide='ignore', invalid='ignore'):
-        return tp/(tp + fn)
+  return tp/(tp + fn + epsilon)
 
 
 def precision_gain(tp, fn, fp, tn):
@@ -31,9 +31,8 @@ def precision_gain(tp, fn, fp, tn):
     """
     n_pos = tp + fn
     n_neg = fp + tn
-    with np.errstate(divide='ignore', invalid='ignore'):
-        prec_gain = 1. - (n_pos/n_neg) * (fp/tp)
-    if np.alen(prec_gain) > 1:
+    prec_gain = 1. - (n_pos/(n_neg+epsilon)) * (fp/(tp+epsilon))
+    if np.alen(prec_gain) > 1:  # TODO wat
         prec_gain[tn + fn == 0] = 0
     elif tn + fn == 0:
         prec_gain = 0
@@ -59,13 +58,12 @@ def recall_gain(tp, fn, fp, tn):
     """
     n_pos = tp + fn
     n_neg = fp + tn
-    with np.errstate(divide='ignore', invalid='ignore'):
-        rg = 1. - (n_pos/n_neg) * (fn/tp)
+    recall_gain = 1. - (n_pos/(n_neg+epsilon)) * (fn/(tp+epsilon))
     if np.alen(rg) > 1:
-        rg[tn + fn == 0] = 1
+        recall_gain[tn + fn == 0] = 1
     elif tn + fn == 0:
-        rg = 1
-    return rg
+        recall_gain = 1
+    return recall_gain
 
 
 def create_segments(labels, pos_scores, neg_scores):
@@ -148,8 +146,7 @@ def _create_crossing_points(points, n_pos, n_neg):
     temp_y_0 = np.append(y, 0)
     temp_0_y = np.append(0, y)
     temp_1_x = np.append(1, x)
-    with np.errstate(invalid='ignore'):
-        indices = np.where(np.logical_and((temp_y_0 * temp_0_y < 0), (temp_1_x >= 0)))[0]
+    indices = np.where(np.logical_and((temp_y_0 * temp_0_y < 0), (temp_1_x >= 0)))[0]
     for i in indices:
         cross_x = x[i-1] + (-y[i-1]) / (y[i] - y[i-1]) * (x[i] - x[i-1])
         [point_1, key_indices_1] = get_point(points, i)
@@ -178,11 +175,11 @@ def _create_crossing_points(points, n_pos, n_neg):
     return points
 
 
-def create_prg_curve(labels, pos_scores, neg_scores=[]):
+def create_prg_curve(y_true, pos_scores, neg_scores=[]):
     """Precision-Recall-Gain curve
 
     This function creates the Precision-Recall-Gain curve from the vector of
-    labels and vector of scores where higher score indicates a higher
+    y_true and vector of scores where higher score indicates a higher
     probability to be positive. More information on Precision-Recall-Gain
     curves and how to cite this work is available at
     http://www.cs.bris.ac.uk/~flach/PRGcurves/.
@@ -190,16 +187,21 @@ def create_prg_curve(labels, pos_scores, neg_scores=[]):
     create_crossing_points = True # do it always because calc_auprg otherwise gives the wrong result
     if np.alen(neg_scores) == 0:
         neg_scores = -pos_scores
-    n = np.alen(labels)
-    n_pos = np.sum(labels)
+    n = np.alen(y_true)
+    n_pos = np.sum(y_true)
     n_neg = n - n_pos
-    # convert negative labels into 0s
+    # convert negative labels into 0s  # TODO why
     labels = 1 * (labels == 1)
     segments = create_segments(labels, pos_scores, neg_scores)
     # calculate recall gains and precision gains for all thresholds
     points = dict()
     points['pos_score'] = np.insert(segments['pos_score'], 0, np.inf)
     points['neg_score'] = np.insert(segments['neg_score'], 0, -np.inf)
+    points['TP'] = (y_true * y_pred).sum(dim=0).to(torch.float32)
+    points['TN'] = ((1 - y_true) * (1 - y_pred)).sum(dim=0).to(torch.float32)
+    points['FP'] = ((1 - y_true) * y_pred).sum(dim=0).to(torch.float32)
+    points['FN'] = (y_true * (1 - y_pred)).sum(dim=0).to(torch.float32)
+    
     points['TP'] = np.insert(np.cumsum(segments['pos_count']), 0, 0)
     points['FP'] = np.insert(np.cumsum(segments['neg_count']), 0, 0)
     points['FN'] = n_pos - points['TP']
@@ -219,8 +221,8 @@ def create_prg_curve(labels, pos_scores, neg_scores=[]):
         points['TN'] = points['TN'][1:]
         points['precision_gain'] = points['precision_gain'][1:]
         points['recall_gain'] = points['recall_gain'][1:]
-    with np.errstate(invalid='ignore'):
-        points['in_unit_square'] = np.logical_and(points['recall_gain'] >= 0,
+    
+    points['in_unit_square'] = np.logical_and(points['recall_gain'] >= 0,
                                               points['precision_gain'] >= 0)
     return points
 
@@ -244,7 +246,6 @@ def calc_auprg(prg_curve):
     return(area)
 
 
-# from
 def convex_hull(points):
     """Computes the convex hull of a set of 2D points.
 
