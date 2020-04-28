@@ -1,13 +1,11 @@
-#!/usr/bin/env python
 """ Software to create Precision-Recall-Gain curves.
 
 Precision-Recall-Gain curves and how to cite this work is available at
 http://www.cs.bris.ac.uk/~flach/PRGcurves/.
 """
-
-from __future__ import division
 import warnings
 import numpy as np
+from typing import Iterable
 import matplotlib.pyplot as plt
 
 epsilon = 1e-7
@@ -32,7 +30,7 @@ def precision_gain(tp, fn, fp, tn):
     n_pos = tp + fn
     n_neg = fp + tn
     prec_gain = 1. - (n_pos/(n_neg+epsilon)) * (fp/(tp+epsilon))
-    if np.alen(prec_gain) > 1:  # TODO wat
+    if isinstance(prec_gain, Iterable):
         prec_gain[tn + fn == 0] = 0
     elif tn + fn == 0:
         prec_gain = 0
@@ -59,44 +57,17 @@ def recall_gain(tp, fn, fp, tn):
     n_pos = tp + fn
     n_neg = fp + tn
     recall_gain = 1. - (n_pos/(n_neg+epsilon)) * (fn/(tp+epsilon))
-    if np.alen(rg) > 1:
+    if isinstance(recall_gain, Iterable):
         recall_gain[tn + fn == 0] = 1
     elif tn + fn == 0:
         recall_gain = 1
     return recall_gain
 
 
-def create_segments(labels, pos_scores, neg_scores):
-    n = np.alen(labels)
-    # reorder labels and pos_scores by decreasing pos_scores, using increasing neg_scores in breaking ties
-    new_order = np.lexsort((neg_scores, -pos_scores))
-    labels = labels[new_order]
-    pos_scores = pos_scores[new_order]
-    neg_scores = neg_scores[new_order]
-    # create a table of segments
-    segments = {'pos_score': np.zeros(n), 'neg_score': np.zeros(n),
-                'pos_count': np.zeros(n), 'neg_count': np.zeros(n)}
-    j = -1
-    for i, label in enumerate(labels):
-        if ((i == 0) or (pos_scores[i-1] != pos_scores[i])
-                     or (neg_scores[i-1] != neg_scores[i])):
-            j += 1
-            segments['pos_score'][j] = pos_scores[i]
-            segments['neg_score'][j] = neg_scores[i]
-        if label == 0:
-            segments['neg_count'][j] += 1
-        else:
-            segments['pos_count'][j] += 1
-    segments['pos_score'] = segments['pos_score'][0:j+1]
-    segments['neg_score'] = segments['neg_score'][0:j+1]
-    segments['pos_count'] = segments['pos_count'][0:j+1]
-    segments['neg_count'] = segments['neg_count'][0:j+1]
-    return segments
-
 
 def get_point(points, index):
     keys = points.keys()
-    point = np.zeros(np.alen(keys))
+    point = np.zeros(len(keys))
     key_indices = dict()
     for i, key in enumerate(keys):
         point[i] = points[key][index]
@@ -117,9 +88,9 @@ def insert_point(new_point, key_indices, points, precision_gain=0,
     return points
 
 
-def _create_crossing_points(points, n_pos, n_neg):
+def _create_crossing_points(points, n_pos, n_neg, n_classes):
     n = n_pos+n_neg
-    points['is_crossing'] = np.zeros(np.alen(points['pos_score']))
+    points['is_crossing'] = np.zeros(n_classes)
     # introduce a crossing point at the crossing through the y-axis
     j = np.amin(np.where(points['recall_gain'] >= 0)[0])
     if points['recall_gain'][j] > 0:  # otherwise there is a point on the boundary and no need for a crossing point
@@ -175,7 +146,7 @@ def _create_crossing_points(points, n_pos, n_neg):
     return points
 
 
-def create_prg_curve(y_true, pos_scores, neg_scores=[]):
+def create_prg_curve(y_true, y_pred):
     """Precision-Recall-Gain curve
 
     This function creates the Precision-Recall-Gain curve from the vector of
@@ -185,43 +156,23 @@ def create_prg_curve(y_true, pos_scores, neg_scores=[]):
     http://www.cs.bris.ac.uk/~flach/PRGcurves/.
     """
     create_crossing_points = True # do it always because calc_auprg otherwise gives the wrong result
-    if np.alen(neg_scores) == 0:
-        neg_scores = -pos_scores
-    n = np.alen(y_true)
+    n = np.size(y_true)
+    n_classes = np.shape(y_true)[1]
     n_pos = np.sum(y_true)
     n_neg = n - n_pos
-    # convert negative labels into 0s  # TODO why
-    labels = 1 * (labels == 1)
-    segments = create_segments(labels, pos_scores, neg_scores)
     # calculate recall gains and precision gains for all thresholds
     points = dict()
-    points['pos_score'] = np.insert(segments['pos_score'], 0, np.inf)
-    points['neg_score'] = np.insert(segments['neg_score'], 0, -np.inf)
-    points['TP'] = (y_true * y_pred).sum(dim=0).to(torch.float32)
-    points['TN'] = ((1 - y_true) * (1 - y_pred)).sum(dim=0).to(torch.float32)
-    points['FP'] = ((1 - y_true) * y_pred).sum(dim=0).to(torch.float32)
-    points['FN'] = (y_true * (1 - y_pred)).sum(dim=0).to(torch.float32)
+    points['TP'] = (y_true * y_pred).sum(axis=0)#.to(torch.float32)
+    points['TN'] = ((1 - y_true) * (1 - y_pred)).sum(axis=0)#.to(torch.float32)
+    points['FP'] = ((1 - y_true) * y_pred).sum(axis=0)#.to(torch.float32)
+    points['FN'] = (y_true * (1 - y_pred)).sum(axis=0)#.to(torch.float32)
     
-    points['TP'] = np.insert(np.cumsum(segments['pos_count']), 0, 0)
-    points['FP'] = np.insert(np.cumsum(segments['neg_count']), 0, 0)
-    points['FN'] = n_pos - points['TP']
-    points['TN'] = n_neg - points['FP']
     points['precision'] = precision(points['TP'], points['FN'], points['FP'], points['TN'])
     points['recall'] = recall(points['TP'], points['FN'], points['FP'], points['TN'])
     points['precision_gain'] = precision_gain(points['TP'], points['FN'], points['FP'], points['TN'])
     points['recall_gain'] = recall_gain(points['TP'], points['FN'], points['FP'], points['TN'])
-    if create_crossing_points == True:
-        points = _create_crossing_points(points, n_pos, n_neg)
-    else:
-        points['pos_score'] = points['pos_score'][1:]
-        points['neg_score'] = points['neg_score'][1:]
-        points['TP'] = points['TP'][1:]
-        points['FP'] = points['FP'][1:]
-        points['FN'] = points['FN'][1:]
-        points['TN'] = points['TN'][1:]
-        points['precision_gain'] = points['precision_gain'][1:]
-        points['recall_gain'] = points['recall_gain'][1:]
-    
+    points = _create_crossing_points(points, n_pos, n_neg, n_classes)
+
     points['in_unit_square'] = np.logical_and(points['recall_gain'] >= 0,
                                               points['precision_gain'] >= 0)
     return points
