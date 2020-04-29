@@ -10,12 +10,13 @@ import matplotlib.pyplot as plt
 
 epsilon = 1e-7
 
-def precision(tp, fn, fp, tn):
-  return tp/(tp + fp + epsilon)
+
+def precision(tp, fp):
+    return tp / (tp + fp + epsilon)
 
 
-def recall(tp, fn, fp, tn):
-  return tp/(tp + fn + epsilon)
+def recall(tp, fn):
+    return tp / (tp + fn + epsilon)
 
 
 def precision_gain(tp, fn, fp, tn):
@@ -29,7 +30,7 @@ def precision_gain(tp, fn, fp, tn):
     """
     n_pos = tp + fn
     n_neg = fp + tn
-    prec_gain = 1. - (n_pos/(n_neg+epsilon)) * (fp/(tp+epsilon))
+    prec_gain = 1. - (n_pos / (n_neg + epsilon)) * (fp / (tp + epsilon))
     if isinstance(prec_gain, Iterable):
         prec_gain[tn + fn == 0] = 0
     elif tn + fn == 0:
@@ -56,94 +57,138 @@ def recall_gain(tp, fn, fp, tn):
     """
     n_pos = tp + fn
     n_neg = fp + tn
-    recall_gain = 1. - (n_pos/(n_neg+epsilon)) * (fn/(tp+epsilon))
+    recall_gain = 1. - (n_pos / (n_neg + epsilon)) * (fn / (tp + epsilon))
     if isinstance(recall_gain, Iterable):
         recall_gain[tn + fn == 0] = 1
     elif tn + fn == 0:
         recall_gain = 1
     return recall_gain
 
+def create_segments(y_true, y_pred):
+    """
+    for each class:
+        sort descending confidence
+        for each confidence level:
+            n_positive, n_negative in gr truth
+        , slice batch col
+    sort descending confidence
+    """
+    n_samples, n_classes = np.shape(y_true)
+    n_true_pos_per_class = y_true.sum(axis=0)
+    n_true_neg_per_class = n_samples*np.ones(n_classes) - n_true_pos_per_class
 
+    threshed_metrics = []
+    for thresh in np.linspace(1,0,101):  # exactly 0.01 apart
+        pred_threshed = (y_pred >= thresh)
+        # num_correct = ((pred_threshed == y_true).sum(dim=0))
 
-def get_point(points, index):
-    keys = points.keys()
+        # these are classwise
+        tp = (y_true * y_pred).sum(dim=0)
+        tn = ((1 - y_true) * (1 - y_pred)).sum(dim=0)
+        fp = ((1 - y_true) * y_pred).sum(dim=0)
+        fn = (y_true * (1 - y_pred)).sum(dim=0)
+
+        # these are class-wise inference
+        precisions = precision(tp, fp)
+        precision_gains = precision_gain(tp, fn, fp, tn)
+        recalls = recall(tp, fn)
+        recall_gains = recall_gain(tp, fn, fp, tn)
+
+        f1s = 2* (precisions*recalls) / (precisions + recalls + epsilon)
+        f1s = f1s.clamp(min=epsilon, max=1-epsilon)  # TODO should be unnecessary
+
+        threshed_metrics.append(dict(thresh=thresh,
+                                     tp=tp,
+                                     tn=tn,
+                                     fp=fp,
+                                     fn=fn,
+                                     precisions=precisions,
+                                     precision_gains=precision_gains,
+                                     recalls=recalls,
+                                     recall_gains=recall_gains,
+                                     f1s=f1s))
+
+    return threshed_metrics
+
+def get_point(curve, index):
+    keys = curve.keys()
     point = np.zeros(len(keys))
     key_indices = dict()
     for i, key in enumerate(keys):
-        point[i] = points[key][index]
+        point[i] = curve[key][index]
         key_indices[key] = i
     return [point, key_indices]
 
 
-def insert_point(new_point, key_indices, points, precision_gain=0,
-        recall_gain=0, is_crossing=0):
+def insert_point(new_point, key_indices, curve, precision_gain=0,
+                 recall_gain=0, is_crossing=0):
     for key in key_indices.keys():
-        points[key] = np.insert(points[key], 0, new_point[key_indices[key]])
-    points['precision_gain'][0] = precision_gain
-    points['recall_gain'][0] = recall_gain
-    points['is_crossing'][0] = is_crossing
-    new_order = np.lexsort((-points['precision_gain'],points['recall_gain']))
-    for key in points.keys():
-        points[key] = points[key][new_order]
-    return points
+        curve[key] = np.insert(curve[key], 0, new_point[key_indices[key]])
+    curve['precision_gain'][0] = precision_gain
+    curve['recall_gain'][0] = recall_gain
+    curve['is_crossing'][0] = is_crossing
+    new_order = np.lexsort((-curve['precision_gain'], curve['recall_gain']))
+    for key in curve.keys():
+        curve[key] = curve[key][new_order]
+    return curve
 
 
-def _create_crossing_points(points, n_pos, n_neg, n_classes):
-    n = n_pos+n_neg
-    points['is_crossing'] = np.zeros(n_classes)
+def _create_crossing_points(curve, n_pos, n_neg, n_classes):
+    n = n_pos + n_neg
+    curve['is_crossing'] = np.zeros(n_classes)
     # introduce a crossing point at the crossing through the y-axis
-    j = np.amin(np.where(points['recall_gain'] >= 0)[0])
-    if points['recall_gain'][j] > 0:  # otherwise there is a point on the boundary and no need for a crossing point
-        [point_1, key_indices_1] = get_point(points, j)
-        [point_2, key_indices_2] = get_point(points, j-1)
+    j = np.amin(np.where(curve['recall_gain'] >= 0)[0])
+    if curve['recall_gain'][j] > 0:  # otherwise there is a point on the boundary and no need for a crossing point
+        [point_1, key_indices_1] = get_point(curve, j)
+        [point_2, key_indices_2] = get_point(curve, j - 1)
         delta = point_1 - point_2
         if delta[key_indices_1['TP']] > 0:
-            alpha = (n_pos*n_pos/n - points['TP'][j-1]) / delta[key_indices_1['TP']]
+            alpha = (n_pos * n_pos / n - curve['TP'][j - 1]) / delta[key_indices_1['TP']]
         else:
             alpha = 0.5
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            new_point = point_2 + alpha*delta
+            new_point = point_2 + alpha * delta
 
         new_prec_gain = precision_gain(new_point[key_indices_1['TP']], new_point[key_indices_1['FN']],
                                        new_point[key_indices_1['FP']], new_point[key_indices_1['TN']])
-        points = insert_point(new_point, key_indices_1, points,
-                              precision_gain=new_prec_gain, is_crossing=1)
+        curve = insert_point(new_point, key_indices_1, curve,
+                             precision_gain=new_prec_gain, is_crossing=1)
 
     # now introduce crossing points at the crossings through the non-negative part of the x-axis
-    x = points['recall_gain']
-    y = points['precision_gain']
+    x = curve['recall_gain']
+    y = curve['precision_gain']
     temp_y_0 = np.append(y, 0)
     temp_0_y = np.append(0, y)
     temp_1_x = np.append(1, x)
     indices = np.where(np.logical_and((temp_y_0 * temp_0_y < 0), (temp_1_x >= 0)))[0]
     for i in indices:
-        cross_x = x[i-1] + (-y[i-1]) / (y[i] - y[i-1]) * (x[i] - x[i-1])
-        [point_1, key_indices_1] = get_point(points, i)
-        [point_2, key_indices_2] = get_point(points, i-1)
+        cross_x = x[i - 1] + (-y[i - 1]) / (y[i] - y[i - 1]) * (x[i] - x[i - 1])
+        [point_1, key_indices_1] = get_point(curve, i)
+        [point_2, key_indices_2] = get_point(curve, i - 1)
         delta = point_1 - point_2
         if delta[key_indices_1['TP']] > 0:
-            alpha = (n_pos * n_pos / (n - n_neg * cross_x) - points['TP'][i-1]) / delta[key_indices_1['TP']]
+            alpha = (n_pos * n_pos / (n - n_neg * cross_x) - curve['TP'][i - 1]) / delta[key_indices_1['TP']]
         else:
-            alpha = (n_neg / n_pos * points['TP'][i-1] - points['FP'][i-1]) / delta[key_indices_1['FP']]
+            alpha = (n_neg / n_pos * curve['TP'][i - 1] - curve['FP'][i - 1]) / delta[key_indices_1['FP']]
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            new_point = point_2 + alpha*delta
+            new_point = point_2 + alpha * delta
 
         new_rec_gain = recall_gain(new_point[key_indices_1['TP']], new_point[key_indices_1['FN']],
                                    new_point[key_indices_1['FP']], new_point[key_indices_1['TN']])
-        points = insert_point(new_point, key_indices_1, points,
-                              recall_gain=new_rec_gain, is_crossing=1)
+        curve = insert_point(new_point, key_indices_1, curve,
+                             recall_gain=new_rec_gain, is_crossing=1)
         i += 1
         indices += 1
-        x = points['recall_gain']
-        y = points['precision_gain']
+        x = curve['recall_gain']
+        y = curve['precision_gain']
         temp_y_0 = np.append(y, 0)
         temp_0_y = np.append(0, y)
         temp_1_x = np.append(1, x)
-    return points
+    return curve
 
 
 def create_prg_curve(y_true, y_pred):
@@ -155,27 +200,29 @@ def create_prg_curve(y_true, y_pred):
     curves and how to cite this work is available at
     http://www.cs.bris.ac.uk/~flach/PRGcurves/.
     """
-    create_crossing_points = True # do it always because calc_auprg otherwise gives the wrong result
-    n = np.size(y_true)
-    n_classes = np.shape(y_true)[1]
-    n_pos = np.sum(y_true)
-    n_neg = n - n_pos
+    threshed_metrics = create_segments(y_true, y_pred)
     # calculate recall gains and precision gains for all thresholds
-    points = dict()
-    points['TP'] = (y_true * y_pred).sum(axis=0)#.to(torch.float32)
-    points['TN'] = ((1 - y_true) * (1 - y_pred)).sum(axis=0)#.to(torch.float32)
-    points['FP'] = ((1 - y_true) * y_pred).sum(axis=0)#.to(torch.float32)
-    points['FN'] = (y_true * (1 - y_pred)).sum(axis=0)#.to(torch.float32)
-    
-    points['precision'] = precision(points['TP'], points['FN'], points['FP'], points['TN'])
-    points['recall'] = recall(points['TP'], points['FN'], points['FP'], points['TN'])
-    points['precision_gain'] = precision_gain(points['TP'], points['FN'], points['FP'], points['TN'])
-    points['recall_gain'] = recall_gain(points['TP'], points['FN'], points['FP'], points['TN'])
-    points = _create_crossing_points(points, n_pos, n_neg, n_classes)
+    curve = dict()
+    curve['pos_score'] = np.insert(segments['pos_score'], 0, np.inf) # start at inf
+    curve['neg_score'] = np.insert(segments['neg_score'], 0, -np.inf) # start at -inf
+    curve['TP'] = np.insert(np.cumsum(segments['pos_count']), 0, 0) # start at 0
+    curve['FP'] = np.insert(np.cumsum(segments['neg_count']), 0, 0) # start at 0
+    curve['FN'] = n_pos - curve['TP']
+    curve['TN'] = n_neg - curve['FP']
+    # curve['TP'] = (y_true * y_pred).sum(axis=0)  # .to(torch.float32)
+    # curve['TN'] = ((1 - y_true) * (1 - y_pred)).sum(axis=0)  # .to(torch.float32)
+    # curve['FP'] = ((1 - y_true) * y_pred).sum(axis=0)  # .to(torch.float32)
+    # curve['FN'] = (y_true * (1 - y_pred)).sum(axis=0)  # .to(torch.float32)
 
-    points['in_unit_square'] = np.logical_and(points['recall_gain'] >= 0,
-                                              points['precision_gain'] >= 0)
-    return points
+    curve['precision'] = precision(curve['TP'], curve['FP'])
+    curve['recall'] = recall(curve['TP'], curve['FN'])
+    curve['precision_gain'] = precision_gain(curve['TP'], curve['FN'], curve['FP'], curve['TN'])
+    curve['recall_gain'] = recall_gain(curve['TP'], curve['FN'], curve['FP'], curve['TN'])
+    curve = _create_crossing_points(curve, n_pos, n_neg, n_classes)
+
+    curve['in_unit_square'] = np.logical_and(curve['recall_gain'] >= 0,
+                                              curve['precision_gain'] >= 0)
+    return curve #tp, fp, tn, fn, precision_gain, recall_gain, n_thresh
 
 
 def calc_auprg(prg_curve):
@@ -189,12 +236,12 @@ def calc_auprg(prg_curve):
     area = 0
     recall_gain = prg_curve['recall_gain']
     precision_gain = prg_curve['precision_gain']
-    for i in range(1,len(recall_gain)):
-        if (not np.isnan(recall_gain[i-1])) and (recall_gain[i-1]>=0):
-            width = recall_gain[i]-recall_gain[i-1]
-            height = (precision_gain[i]+precision_gain[i-1])/2
-            area += width*height
-    return(area)
+    for i in range(1, len(recall_gain)):
+        if (not np.isnan(recall_gain[i - 1])) and (recall_gain[i - 1] >= 0):
+            width = recall_gain[i] - recall_gain[i - 1]
+            height = (precision_gain[i] + precision_gain[i - 1]) / 2
+            area += width * height
+    return (area)
 
 
 def convex_hull(points):
@@ -232,7 +279,7 @@ def convex_hull(points):
     return upper
 
 
-def plot_prg(prg_curve,show_convex_hull=True,show_f_calibrated_scores=False):
+def plot_prg(prg_curve, show_convex_hull=True, show_f_calibrated_scores=False):
     """Plot the Precision-Recall-Gain curve
 
     This function plots the Precision-Recall-Gain curve resulting from the
@@ -256,15 +303,15 @@ def plot_prg(prg_curve,show_convex_hull=True,show_f_calibrated_scores=False):
     pg = prg_curve['precision_gain']
     rg = prg_curve['recall_gain']
 
-    fig = plt.figure(figsize=(6,5))
+    fig = plt.figure(figsize=(6, 5))
     plt.clf()
     plt.axes(frameon=False)
     ax = fig.gca()
-    ax.set_xticks(np.arange(0,1.25,0.25))
-    ax.set_yticks(np.arange(0,1.25,0.25))
+    ax.set_xticks(np.arange(0, 1.25, 0.25))
+    ax.set_yticks(np.arange(0, 1.25, 0.25))
     ax.grid(b=True)
-    ax.set_xlim((-0.05,1.02))
-    ax.set_ylim((-0.05,1.02))
+    ax.set_xlim((-0.05, 1.02))
+    ax.set_ylim((-0.05, 1.02))
     ax.set_aspect('equal')
     # Plot vertical and horizontal lines crossing the 0 axis
     plt.axvline(x=0, ymin=-0.05, ymax=1, color='k')
@@ -277,7 +324,7 @@ def plot_prg(prg_curve,show_convex_hull=True,show_f_calibrated_scores=False):
     plt.plot(rg[indices], pg[indices], 'c-', linewidth=2)
     # Plot blue lines
     indices = np.logical_or(prg_curve['is_crossing'],
-                       prg_curve['in_unit_square'])
+                            prg_curve['in_unit_square'])
     plt.plot(rg[indices], pg[indices], 'b-', linewidth=2)
     # Plot blue dots
     indices = np.logical_and(prg_curve['in_unit_square'],
@@ -287,8 +334,8 @@ def plot_prg(prg_curve,show_convex_hull=True,show_f_calibrated_scores=False):
     plt.xlabel('Recall Gain')
     plt.ylabel('Precision Gain')
 
-    valid_points = np.logical_and( ~ np.isnan(rg), ~ np.isnan(pg))
-    upper_hull = convex_hull(zip(rg[valid_points],pg[valid_points]))
+    valid_points = np.logical_and(~ np.isnan(rg), ~ np.isnan(pg))
+    upper_hull = convex_hull(zip(rg[valid_points], pg[valid_points]))
     rg_hull, pg_hull = zip(*upper_hull)
     if show_convex_hull:
         plt.plot(rg_hull, pg_hull, 'r--')
@@ -302,15 +349,15 @@ def plot_pr(prg_curve):
     p = prg_curve['precision']
     r = prg_curve['recall']
 
-    fig = plt.figure(figsize=(6,5))
+    fig = plt.figure(figsize=(6, 5))
     plt.clf()
     plt.axes(frameon=False)
     ax = fig.gca()
-    ax.set_xticks(np.arange(0,1.25,0.25))
-    ax.set_yticks(np.arange(0,1.25,0.25))
+    ax.set_xticks(np.arange(0, 1.25, 0.25))
+    ax.set_yticks(np.arange(0, 1.25, 0.25))
     ax.grid(b=True)
-    ax.set_xlim((-0.05,1.02))
-    ax.set_ylim((-0.05,1.02))
+    ax.set_xlim((-0.05, 1.02))
+    ax.set_ylim((-0.05, 1.02))
     ax.set_aspect('equal')
     # Plot vertical and horizontal lines crossing the 0 axis
     plt.axvline(x=0, ymin=-0.05, ymax=1, color='k')
@@ -324,16 +371,3 @@ def plot_pr(prg_curve):
 
     plt.show()
     return fig
-
-
-def test():
-    labels = np.array([1,1,1,0,1,1,1,1,1,1,0,1,1,1,0,1,0,0,1,0,0,0,1,0,1], dtype='int')
-    scores = np.around(np.log(np.arange(1,26)[::-1]),1)
-    scores = np.arange(1,26)[::-1]
-    prg_curve = create_prg_curve(labels, scores)
-    auprg = calc_auprg(prg_curve)
-    plot_prg(prg_curve)
-
-
-if __name__ == '__main__':
-    pass
